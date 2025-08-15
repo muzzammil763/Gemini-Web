@@ -1,0 +1,580 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Gemini + Imagen + Veo — Quota-safe demo</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Import map to load @google/genai in the browser -->
+  <script type="importmap">
+  {
+    "imports": {
+      "@google/genai": "https://cdn.jsdelivr.net/npm/@google/genai@1/+esm"
+    }
+  }
+  </script>
+  <style>
+    :root{--bg:#0f1117;--fg:#e6edf3;--muted:#9aa4b2;--card:#121621;--accent:#6aa6ff;--danger:#ff6a6a;--ok:#46d19a}
+    body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Inter,sans-serif}
+    header,footer{padding:12px 16px;background:#0b0e15;border-bottom:1px solid #1c2230}
+    h1{font-weight:600;font-size:16px;margin:0}
+    main{display:grid;grid-template-columns:280px 1fr;gap:12px;padding:12px}
+    .card{background:var(--card);border:1px solid #1c2230;border-radius:10px;padding:12px}
+    .row{display:flex;gap:8px;align-items:center}
+    input,select,button,textarea{border-radius:8px;border:1px solid #2a3244;background:#0b0e15;color:var(--fg);padding:8px}
+    input[type="checkbox"]{width:auto}
+    button{cursor:pointer}
+    button.primary{background:var(--accent);border-color:#447ee6}
+    button.danger{background:#2a0e12;border-color:#7a2632;color:#ffb3b3}
+    small, label{color:var(--muted)}
+    pre{white-space:pre-wrap;word-break:break-word}
+    .tabs{display:flex;gap:8px;margin-bottom:8px}
+    .tabs button{background:#0c1220}
+    .tabs button.active{background:#16233a;border-color:#2b4a86}
+    .status{font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;white-space:pre-wrap}
+    .flex{display:flex;gap:8px}
+    .col{display:flex;flex-direction:column;gap:8px}
+    .grow{flex:1}
+    .grid{display:grid;gap:8px}
+    .grid.two{grid-template-columns:1fr 1fr}
+    .tag{padding:2px 6px;background:#0b1424;border:1px solid #1a2b4a;border-radius:999px;color:#b7c8e8}
+    .good{color:var(--ok)} .bad{color:var(--danger)}
+    .toast{position:fixed;right:12px;bottom:12px;max-width:420px;padding:12px;border-radius:10px;background:#122133;border:1px solid #243751;box-shadow:0 8px 24px rgba(0,0,0,.4)}
+    .hidden{display:none}
+    video, img{max-width:100%;border-radius:8px;border:1px solid #253048}
+    .history{max-height:200px;overflow:auto;border:1px solid #1c2230;border-radius:8px;padding:8px}
+    .tests pre{max-height:180px;overflow:auto;background:#0c0f18;border:1px solid #20273a;border-radius:8px;padding:8px}
+  </style>
+</head>
+<body>
+<header class="row">
+  <h1>Gemini + Imagen + Veo (quota‑safe)</h1>
+  <div class="row" style="margin-left:auto; gap:12px">
+    <span class="tag">Response time: <span id="latency">—</span></span>
+    <span class="tag">Tokens in/out: <span id="tokens">—</span></span>
+  </div>
+</header>
+
+<main>
+  <!-- Left sidebar -->
+  <section class="card col">
+    <div class="col">
+      <label>Gemini API Key</label>
+      <input id="apiKey" type="password" placeholder="Paste API key (never stored unless you tick Remember)" />
+      <label class="row"><input id="remember" type="checkbox" /> Remember locally</label>
+    </div>
+
+    <div class="col">
+      <label>Usage tier</label>
+      <select id="tier">
+        <option value="free">Free</option>
+        <option value="tier1">Tier 1</option>
+        <option value="tier2">Tier 2</option>
+        <option value="tier3">Tier 3</option>
+      </select>
+      <small>We throttle per model based on your selected tier’s RPM to avoid 429s. You can still hit hard quotas (RPD/TPM).</small>
+    </div>
+
+    <div class="col">
+      <label>Rate‑limit policy</label>
+      <div class="row">
+        <label class="row"><input id="autoRetry" type="checkbox" checked /> Auto‑retry on 429</label>
+        <label class="row"><input id="fallbackModels" type="checkbox" /> Fallback to cheaper/faster models</label>
+      </div>
+      <small>Retries use exponential backoff + jitter and honor <code>Retry‑After</code> if provided.</small>
+    </div>
+
+    <div class="col">
+      <label>History</label>
+      <div class="row">
+        <button id="exportHist">Export</button>
+        <button id="importHist">Import</button>
+        <button id="clearHist" class="danger">Clear</button>
+      </div>
+      <div id="history" class="history"></div>
+    </div>
+
+    <div class="col tests">
+      <label>Built‑in tests</label>
+      <button id="runTests">Run tests</button>
+      <pre id="testLog">No tests run yet.</pre>
+    </div>
+  </section>
+
+  <!-- Right main -->
+  <section class="card">
+    <div class="tabs">
+      <button class="active" data-tab="chat">Chat</button>
+      <button data-tab="image">Image Gen</button>
+      <button data-tab="video">Video (Veo)</button>
+    </div>
+
+    <div id="tab-chat" class="grid">
+      <div class="grid two">
+        <select id="chatModel">
+          <option>gemini-2.5-flash</option>
+          <option>gemini-2.5-pro</option>
+          <option>gemini-2.0-flash</option>
+          <option>gemini-2.0-flash-lite</option>
+        </select>
+        <input id="chatSys" placeholder="System instruction (optional)" />
+      </div>
+      <textarea id="chatInput" rows="5" placeholder="Say hello…"></textarea>
+      <div class="row"><button id="chatSend" class="primary">Send</button></div>
+      <pre id="chatOut" class="status"></pre>
+    </div>
+
+    <div id="tab-image" class="grid hidden">
+      <div class="grid two">
+        <select id="imageModel">
+          <option>imagen-3.0-generate-002</option>
+        </select>
+        <input id="imagePrompt" placeholder="A watercolor of a cat riding a bike" />
+      </div>
+      <div class="row"><button id="imageGen" class="primary">Generate image</button></div>
+      <div id="imageOut"></div>
+    </div>
+
+    <div id="tab-video" class="grid hidden">
+      <div class="grid two">
+        <select id="videoModel">
+          <option>veo-3.0-generate-preview</option>
+          <option>veo-3.0-fast-generate-preview</option>
+          <option>veo-2.0-generate-001</option>
+        </select>
+        <select id="videoAR">
+          <option value="16:9">16:9</option>
+          <option value="9:16">9:16</option>
+        </select>
+      </div>
+      <input id="videoPrompt" placeholder='e.g., "Cinematic slow‑motion splash of ink forming a dragon; include deep whoosh SFX"' />
+      <div class="row"><button id="videoGen" class="primary">Generate video</button></div>
+      <div id="videoStatus" class="status"></div>
+      <div id="videoOut"></div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <small>
+    Tip: If you still see 429s after retries, check your plan/billing/quota and consider upgrading your usage tier in AI Studio. Rate‑limit tables (incl. Veo) are in Google’s docs. </small>
+</footer>
+
+<div id="toast" class="toast hidden"></div>
+
+<script type="module">
+import { GoogleGenAI } from "@google/genai";
+
+/* ----------------------------- Utilities ----------------------------- */
+
+const $ = sel => document.querySelector(sel);
+const on = (el, ev, fn) => el.addEventListener(ev, fn);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const now = () => performance.now();
+
+function showToast(msg, isError=false){
+  const el = $("#toast");
+  el.textContent = msg;
+  el.classList.toggle("hidden", false);
+  el.style.borderColor = isError ? "#7a2632" : "#243751";
+  el.style.background = isError ? "#2a0e12" : "#122133";
+  setTimeout(()=> el.classList.add("hidden"), 6000);
+}
+
+function safeJSON(x){ try { return JSON.stringify(x, null, 2); } catch { return String(x); } }
+
+function parseRetryAfter(h){
+  if(!h) return null;
+  const v = (typeof h === "string" ? h : h.get?.("retry-after") || h["retry-after"] || h["Retry-After"]);
+  if(!v) return null;
+  const s = parseInt(v, 10);
+  return Number.isFinite(s) ? Math.max(0, s) : null;
+}
+function backoffDelay(attempt, baseMs=1000, maxMs=30000){
+  const exp = Math.min(maxMs, baseMs * Math.pow(2, attempt));
+  const jitter = Math.random() * 0.3 * exp; // up to +30% jitter
+  return exp + jitter;
+}
+
+/* ------------------------ Simple Model RPM table ---------------------- */
+/* Based on Google docs (Free/TierX). We only include the models used here.
+   You can edit these if your project has custom limits. */
+const RPM_TABLE = {
+  free: {
+    "gemini-2.5-flash": 10,
+    "gemini-2.5-pro": 5,
+    "gemini-2.0-flash": 15,
+    "gemini-2.0-flash-lite": 30,
+    "imagen-3.0-generate-002": 10, // images/min (proxy)
+    "veo-3.0-generate-preview": 2,
+    "veo-3.0-fast-generate-preview": 2,
+    "veo-2.0-generate-001": 2,
+  },
+  tier1: {
+    "gemini-2.5-flash": 1000,
+    "gemini-2.5-pro": 150,
+    "gemini-2.0-flash": 2000,
+    "gemini-2.0-flash-lite": 4000,
+    "imagen-3.0-generate-002": 20,  // Imagen 3 listed separately, using a conservative value
+    "veo-3.0-generate-preview": 2,
+    "veo-3.0-fast-generate-preview": 2,
+    "veo-2.0-generate-001": 2,
+  },
+  tier2: {
+    "gemini-2.5-flash": 2000,
+    "gemini-2.5-pro": 1000,
+    "gemini-2.0-flash": 10000,
+    "gemini-2.0-flash-lite": 20000,
+    "imagen-3.0-generate-002": 20,
+    "veo-3.0-generate-preview": 4,
+    "veo-3.0-fast-generate-preview": 4,
+    "veo-2.0-generate-001": 2,
+  },
+  tier3: {
+    "gemini-2.5-flash": 10000,
+    "gemini-2.5-pro": 2000,
+    "gemini-2.0-flash": 30000,
+    "gemini-2.0-flash-lite": 30000,
+    "imagen-3.0-generate-002": 20,
+    "veo-3.0-generate-preview": 10,
+    "veo-3.0-fast-generate-preview": 10,
+    "veo-2.0-generate-001": 2,
+  }
+};
+// (RPM values reflect Google’s rate‑limits page at the time of writing; capacity may vary.)
+
+/* --------------------------- Token bucket ----------------------------- */
+class TokenBucket {
+  constructor({rpm}){ this.capacity=rpm; this.tokens=rpm; this.windowStart=Date.now(); }
+  tryRemove(){
+    const nowT=Date.now();
+    if(nowT - this.windowStart >= 60_000){ this.tokens=this.capacity; this.windowStart=nowT; }
+    if(this.tokens>0){ this.tokens--; return true; }
+    return false;
+  }
+  timeToReset(){ return Math.max(0, 60_000 - (Date.now()-this.windowStart)); }
+}
+
+/* ----------------------------- Queue/Gate ----------------------------- */
+class Gate {
+  constructor(max=1){ this.max=max; this.inFlight=0; this.q=[]; }
+  async run(fn){
+    if(this.inFlight>=this.max){
+      await new Promise(res=> this.q.push(res));
+    }
+    this.inFlight++;
+    try{ return await fn(); }
+    finally{
+      this.inFlight--;
+      const n = this.q.shift();
+      if(n) n();
+    }
+  }
+}
+const gates = {
+  chat: new Gate(2),
+  image: new Gate(1),
+  video: new Gate(1),
+};
+const buckets = new Map();
+function getBucket(model){
+  const tier = $("#tier").value || "free";
+  const rpm = (RPM_TABLE[tier] && RPM_TABLE[tier][model]) || 2;
+  const key = tier+":"+model;
+  if(!buckets.has(key)) buckets.set(key, new TokenBucket({rpm}));
+  return buckets.get(key);
+}
+
+/* --------------------------- Retry wrapper ---------------------------- */
+async function withRetry(op, {max=5, baseMs=1000, maxMs=30000, tag="op"} = {}){
+  let attempt = 0, lastErr;
+  while(true){
+    const t0 = now();
+    try{
+      const res = await op();
+      const dt = Math.round(now()-t0);
+      return {res, dt, attempts:attempt+1};
+    }catch(e){
+      lastErr = e;
+      // Normalize
+      const status = e?.status || e?.code || e?.cause?.status;
+      const msg = e?.message || (e?.error && (e.error.message || e.error.status)) || "Unknown error";
+      const retryAfter = parseRetryAfter(e?.headers) ?? parseRetryAfter(e?.response?.headers);
+      const is429 = status === 429 || /RESOURCE_EXHAUSTED|rate limit/i.test(msg);
+      const isTransient = is429 || status === 503 || status === 500;
+      if(!$("#autoRetry").checked || !isTransient || attempt >= max){
+        throw e;
+      }
+      attempt++;
+      let delayMs = retryAfter ? retryAfter*1000 : backoffDelay(attempt, baseMs, maxMs);
+      showToast(`Rate‑limited (${tag}). Retrying in ${(delayMs/1000).toFixed(1)}s… [attempt ${attempt}/${max}]`, true);
+      await sleep(delayMs);
+    }
+  }
+}
+
+/* ---------------------------- SDK set up ------------------------------ */
+let ai=null;
+function ensureClient(){
+  const key = $("#apiKey").value.trim();
+  if(!key) throw new Error("API key required");
+  ai = new GoogleGenAI({ apiKey: key });
+}
+
+/* ------------------------------ Tabs --------------------------------- */
+document.querySelectorAll(".tabs button").forEach(btn=>{
+  on(btn, "click", ()=>{
+    document.querySelectorAll(".tabs button").forEach(b=>b.classList.remove("active"));
+    btn.classList.add("active");
+    ["chat","image","video"].forEach(id=>{
+      $("#tab-"+id).classList.toggle("hidden", id!==btn.dataset.tab);
+    });
+  });
+});
+
+/* --------------------------- Persist key ------------------------------ */
+(function init(){
+  const saved = localStorage.getItem("gemini_api_key");
+  if(saved){ $("#apiKey").value = saved; $("#remember").checked = true; }
+  renderHistory();
+})();
+on($("#apiKey"), "input", ()=>{
+  if($("#remember").checked){ localStorage.setItem("gemini_api_key", $("#apiKey").value); }
+});
+on($("#remember"), "change", ()=>{
+  if($("#remember").checked){ localStorage.setItem("gemini_api_key", $("#apiKey").value); }
+  else localStorage.removeItem("gemini_api_key");
+});
+
+/* ------------------------------ Chat --------------------------------- */
+const history = JSON.parse(localStorage.getItem("history")||"[]");
+function pushHistory(item){ history.unshift(item); localStorage.setItem("history", JSON.stringify(history)); renderHistory(); }
+function renderHistory(){ $("#history").innerHTML = history.map(h=>`<div><small>${new Date(h.ts).toLocaleString()}</small><br><b>${h.type}</b>: ${h.summary}</div>`).join("") || "<small>No history yet.</small>"; }
+
+on($("#chatSend"), "click", async ()=>{
+  try{
+    ensureClient();
+    const model = $("#chatModel").value;
+    const bucket = getBucket(model);
+    const sys = $("#chatSys").value.trim();
+    const prompt = $("#chatInput").value.trim() || "Hello!";
+    const gate = gates.chat;
+
+    if(!bucket.tryRemove()){
+      const wait = Math.ceil(bucket.timeToReset()/1000);
+      throw new Error(`Local throttle: ${wait}s until next ${model} call (RPM window).`);
+    }
+
+    const t0 = now();
+    const {res, dt} = await gate.run(()=> withRetry(async ()=>{
+      const contents = sys ? [{role:"user", parts:[{text: sys+"\n\n"+prompt}]}] : prompt;
+      return await ai.models.generateContent({ model, contents });
+    }, {tag:`chat:${model}`}));
+
+    const text = res?.text ?? "(no text)";
+    $("#chatOut").textContent = text;
+    $("#latency").textContent = dt+" ms";
+
+    const u = res?.usageMetadata || res?.usage || res?.response?.usageMetadata;
+    $("#tokens").textContent = u ? `${u.promptTokenCount ?? "?"}/${u.candidatesTokenCount ?? "?"}` : "—";
+
+    pushHistory({ts:Date.now(), type:"chat", summary: prompt.slice(0,80)});
+  }catch(e){
+    handleError(e, "chat");
+  }
+});
+
+/* ---------------------------- Image Gen ------------------------------- */
+on($("#imageGen"), "click", async ()=>{
+  try{
+    ensureClient();
+    const model = $("#imageModel").value;
+    const bucket = getBucket(model);
+    const gate = gates.image;
+    const prompt = $("#imagePrompt").value.trim() || "A watercolor of a cat riding a bike";
+
+    if(!bucket.tryRemove()){
+      const wait = Math.ceil(bucket.timeToReset()/1000);
+      throw new Error(`Local throttle: ${wait}s until next ${model} call (RPM window).`);
+    }
+
+    const {res, dt} = await gate.run(()=> withRetry(async ()=>{
+      return await ai.models.generateImages({ model, prompt });
+    }, {tag:`image:${model}`}));
+
+    $("#latency").textContent = dt+" ms";
+    const container = $("#imageOut"); container.innerHTML = "";
+    const imgs = res?.generatedImages || [];
+    if(imgs.length===0) container.textContent = "(no images returned)";
+    imgs.forEach((g,i)=>{
+      const mime = g?.image?.mimeType || "image/png";
+      const b64  = g?.image?.imageBytes || "";
+      const url = `data:${mime};base64,${b64}`;
+      const img = new Image(); img.src = url; img.alt = "Generated image "+(i+1);
+      const a = document.createElement("a"); a.href = url; a.download = `imagen_${Date.now()}_${i+1}.png`;
+      a.textContent = "Download";
+      const wrap = document.createElement("div"); wrap.className = "col"; wrap.append(img,a);
+      container.append(wrap);
+    });
+    const u = res?.usageMetadata || res?.usage;
+    $("#tokens").textContent = u ? `${u.promptTokenCount ?? "?"}/${u.candidatesTokenCount ?? "?"}` : "—";
+    pushHistory({ts:Date.now(), type:"image", summary: prompt.slice(0,80)});
+  }catch(e){
+    handleError(e, "image");
+  }
+});
+
+/* ----------------------------- Veo 3/2 -------------------------------- */
+on($("#videoGen"), "click", async ()=>{
+  try{
+    ensureClient();
+    const model = $("#videoModel").value;
+    const bucket = getBucket(model);
+    const gate = gates.video;
+    const prompt = $("#videoPrompt").value.trim() || "Cinematic single shot of ocean waves, include soft ambience";
+    const ar = $("#videoAR").value;
+
+    if(!bucket.tryRemove()){
+      const wait = Math.ceil(bucket.timeToReset()/1000);
+      throw new Error(`Local throttle: ${wait}s until next ${model} call (RPM window).`);
+    }
+
+    $("#videoStatus").textContent = "Submitting job…";
+    const {res: startOp} = await gate.run(()=> withRetry(async ()=>{
+      return await ai.models.generateVideos({
+        model,
+        prompt,
+        config: { aspectRatio: ar }
+      });
+    }, {tag:`video:${model}`}));
+
+    // Poll every 10s per docs to avoid rate pressure
+    let operation = startOp;
+    let polls = 0;
+    while(!operation.done){
+      polls++;
+      $("#videoStatus").textContent = `Waiting for video… poll #${polls}`;
+      await sleep(10_000);
+      const {res: op2} = await withRetry(async ()=>{
+        return await ai.operations.getVideosOperation({ operation });
+      }, {tag:"video:poll", baseMs:1500});
+      operation = op2;
+    }
+
+    const videoObj = operation?.response?.generatedVideos?.[0];
+    if(!videoObj){ throw new Error("Operation finished but no video in response"); }
+
+    // Browser download via file.uri
+    const file = videoObj.video;
+    const uri = file?.uri;
+    const mime = file?.mimeType || "video/mp4";
+    if(!uri){ throw new Error("No file URI returned for video"); }
+
+    $("#videoStatus").textContent = "Downloading video…";
+    const resp = await fetch(uri);
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+
+    const video = document.createElement("video");
+    video.controls = true; video.src = url;
+
+    const a = document.createElement("a");
+    a.href = url; a.download = `veo_${Date.now()}.mp4`; a.textContent = "Download MP4";
+
+    const out = $("#videoOut"); out.innerHTML=""; out.append(video, document.createElement("br"), a);
+    $("#videoStatus").textContent = "Done.";
+    pushHistory({ts:Date.now(), type:"video", summary: prompt.slice(0,80)});
+  }catch(e){
+    handleError(e, "video");
+  }
+});
+
+/* --------------------------- Fallback logic --------------------------- */
+function maybeFallback(model){
+  if(!$("#fallbackModels").checked) return model;
+  const chain = {
+    "gemini-2.5-flash": ["gemini-2.0-flash","gemini-2.0-flash-lite"],
+    "gemini-2.5-pro":   ["gemini-2.5-flash","gemini-2.0-flash"],
+    "veo-3.0-generate-preview": ["veo-3.0-fast-generate-preview","veo-2.0-generate-001"],
+    "veo-3.0-fast-generate-preview": ["veo-2.0-generate-001"],
+  };
+  const next = chain[model]?.[0];
+  return next || model;
+}
+
+/* ----------------------------- Error UI ------------------------------- */
+function handleError(e, tag){
+  const status = e?.status || e?.code || e?.cause?.status || "—";
+  const msg = e?.message || e?.error?.message || e?.toString?.() || "Unknown error";
+  const is429 = status === 429 || /RESOURCE_EXHAUSTED|rate limit/i.test(msg);
+  const help = is429
+    ? "You’ve hit a rate or daily quota. Reduce request rate, wait for the window reset, or upgrade your usage tier in AI Studio."
+    : "Request failed. Try again later or switch model.";
+  const detail = `[${tag}] status=${status}\n${msg}`;
+  $("#latency").textContent = "—";
+  $("#tokens").textContent = "—";
+  showToast(help, true);
+  console.error(detail, e);
+  const out = tag==="chat" ? $("#chatOut") : tag==="image" ? $("#imageOut") : $("#videoStatus");
+  if(out) out.textContent = detail;
+}
+
+/* --------------------------- History import/export -------------------- */
+on($("#exportHist"), "click", ()=>{
+  const data = JSON.stringify(history, null, 2);
+  const url = URL.createObjectURL(new Blob([data], {type:"application/json"}));
+  const a = document.createElement("a"); a.href = url; a.download = "history.json"; a.click();
+  URL.revokeObjectURL(url);
+});
+on($("#importHist"), "click", async ()=>{
+  const input = document.createElement("input"); input.type="file"; input.accept="application/json";
+  input.onchange = async () => {
+    const file = input.files[0]; if(!file) return;
+    const text = await file.text();
+    try{
+      const arr = JSON.parse(text);
+      if(Array.isArray(arr)){ localStorage.setItem("history", JSON.stringify(arr)); history.splice(0, history.length, ...arr); renderHistory(); }
+      else throw new Error("Invalid JSON");
+    } catch(err){ showToast("Failed to import history: "+err.message, true); }
+  };
+  input.click();
+});
+on($("#clearHist"), "click", ()=>{ localStorage.removeItem("history"); history.splice(0); renderHistory(); });
+
+/* ----------------------------- Tests --------------------------------- */
+on($("#runTests"), "click", async ()=>{
+  const log = [];
+  function assert(name, cond){ log.push(`${cond?"✅":"❌"} ${name}`); if(!cond) throw new Error(name); }
+  try{
+    // backoff increases
+    const d1 = backoffDelay(1, 100, 2000);
+    const d2 = backoffDelay(2, 100, 2000);
+    assert("backoff grows", d2>d1 && d1>0);
+
+    // retry-after parsing
+    assert("Retry-After seconds", parseRetryAfter({"Retry-After":"3"})===3);
+    assert("Retry-After missing", parseRetryAfter({})===null);
+
+    // token bucket resets
+    const tb = new TokenBucket({rpm:2});
+    assert("bucket allow #1", tb.tryRemove()===true);
+    assert("bucket allow #2", tb.tryRemove()===true);
+    assert("bucket deny #3", tb.tryRemove()===false);
+
+    // gate queue sequencing
+    const g = new Gate(1);
+    let seq = [];
+    const p1 = g.run(()=> sleep(50).then(()=> seq.push(1)));
+    const p2 = g.run(()=> sleep(10).then(()=> seq.push(2)));
+    await Promise.all([p1,p2]);
+    assert("gate enforces order", seq[0]===1 && seq[1]===2);
+
+    $("#testLog").textContent = log.join("\n") + "\nAll tests passed.";
+    showToast("Tests passed.");
+  }catch(e){
+    $("#testLog").textContent = log.join("\n") + "\n" + e.message;
+    showToast("Some tests failed — check log.", true);
+  }
+});
+</script>
+</body>
+</html>
